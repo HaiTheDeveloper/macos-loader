@@ -1,11 +1,11 @@
 #include <iostream>
 
-__attribute__((constructor)) void init()
+__attribute__((constructor)) int init()
 {
-    std::cout << "[mylib] Constructor called! Injected dylib running.\n";
+    return 21;
 }
 
-extern "C" void hello()
+extern "C" int hello()
 {
-    std::cout << "[mylib] mylib_entry() called manually.\n";
+    return 42;
 }

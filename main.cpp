@@ -475,12 +475,13 @@ bool run_global_constructors(void *base_memory, uint64_t base_vmaddr, const char
     {
         uint64_t func_vmaddr = text_segment->vmaddr + offsets[i];
         uint64_t func_offset_in_mem = func_vmaddr - base_vmaddr;
-        void (*ctor)() = reinterpret_cast<void (*)()>((uint8_t *)base_memory + func_offset_in_mem);
+        int (*ctor)() = reinterpret_cast<int (*)()>((uint8_t *)base_memory + func_offset_in_mem);
 
         std::cout << "Calling ctor at VM addr: 0x" << std::hex << func_vmaddr
                   << ", mem ptr: " << (void *)ctor << std::dec << "\n";
 
-        ctor();
+        const auto test_ctor_value = ctor();
+        printf("ctor returned = %d\n", test_ctor_value);
     }
 
     return true;
@@ -667,18 +668,19 @@ int main(int argc, char **argv)
 
     std::cout << "Mach-O binary loaded and rebased/bound in memory.\n";
 
-    uintptr_t symbol_addr = find_symbol_address(macho_data.data(), "_hello", base_vmaddr);
+    uintptr_t symbol_addr = find_symbol_address(macho_data.data(), "hello", base_vmaddr);
     if (symbol_addr == 0)
     {
         std::cerr << "Symbol not found.\n";
         return 0;
     }
 
-    using func_t = void (*)();
+    using func_t = int (*)();
 
     func_t func = (func_t)((uintptr_t)mapped_memory + (symbol_addr - base_vmaddr));
 
-    func(); // Call the function!
+    const auto test_value = func(); //
+    printf("test value = %d\n", test_value);
 
     munmap(mapped_memory, max_vmaddr - base_vmaddr);
 
