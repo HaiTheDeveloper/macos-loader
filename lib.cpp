@@ -1,11 +1,11 @@
-#include <iostream>
+#include <stdio.h>
 
-__attribute__((constructor)) int init()
+__attribute__((constructor)) void init()
 {
-    return 21;
+    printf("called ctor\n");
 }
 
-extern "C" int hello()
+void _hello()
 {
-    return 42;
+    printf("called hello\n");
 }
