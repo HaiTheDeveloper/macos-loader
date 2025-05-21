@@ -104,116 +104,6 @@ uintptr_t page_align_up(uintptr_t addr)
     return (addr + pageSize - 1) & ~(pageSize - 1);
 }
 
-int map_segments(const struct mach_header_64 *header, const uint8_t *file_data, size_t file_size)
-{
-    const struct load_command *cmd = (const struct load_command *)(file_data + sizeof(struct mach_header_64));
-    const struct load_command *cmds_end = (const struct load_command *)(file_data + header->sizeofcmds + sizeof(struct mach_header_64));
-
-    // Calculate the min and max vmaddr for base address
-    uintptr_t min_vmaddr = UINTPTR_MAX;
-    uintptr_t max_vmaddr = 0;
-
-    for (const struct load_command *lc = cmd; lc < cmds_end; lc = (const struct load_command *)((uintptr_t)lc + lc->cmdsize))
-    {
-        if (lc->cmd == LC_SEGMENT_64)
-        {
-            const struct segment_command_64 *seg = (const struct segment_command_64 *)lc;
-            if (seg->vmsize == 0)
-                continue;
-
-            if (seg->vmaddr < min_vmaddr)
-                min_vmaddr = seg->vmaddr;
-            if (seg->vmaddr + seg->vmsize > max_vmaddr)
-                max_vmaddr = seg->vmaddr + seg->vmsize;
-        }
-    }
-
-    if (min_vmaddr == UINTPTR_MAX)
-    {
-        std::cerr << "No segments found\n";
-        return -1;
-    }
-
-    // Calculate the full size needed to mmap
-    size_t total_vm_size = max_vmaddr - min_vmaddr;
-    size_t pageSize = getpagesize();
-    uintptr_t aligned_min_vmaddr = page_align_down(min_vmaddr);
-    size_t aligned_vm_size = page_align_up(total_vm_size);
-
-    // mmap the whole range first with PROT_NONE
-    void *base_addr = mmap(nullptr, aligned_vm_size, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-    if (base_addr == MAP_FAILED)
-    {
-        perror("mmap base");
-        return -1;
-    }
-
-    std::cout << "Mapped base at " << base_addr << " size " << aligned_vm_size << "\n";
-
-    // Map each segment content individually inside the reserved area
-    for (const struct load_command *lc = cmd; lc < cmds_end; lc = (const struct load_command *)((uintptr_t)lc + lc->cmdsize))
-    {
-        if (lc->cmd == LC_SEGMENT_64)
-        {
-            const struct segment_command_64 *seg = (const struct segment_command_64 *)lc;
-            if (seg->vmsize == 0)
-                continue;
-
-            // Calculate destination address for this segment inside the base mmap
-            uintptr_t seg_vmaddr_offset = seg->vmaddr - aligned_min_vmaddr;
-            void *seg_addr = (void *)((uintptr_t)base_addr + seg_vmaddr_offset);
-
-            // Copy segment data from file to mapped memory
-            if (seg->filesize > 0)
-            {
-                if (seg->fileoff + seg->filesize > file_size)
-                {
-                    std::cerr << "Segment filesize out of bounds\n";
-                    munmap(base_addr, aligned_vm_size);
-                    return -1;
-                }
-                memcpy(seg_addr, file_data + seg->fileoff, seg->filesize);
-            }
-
-            // Zero out remaining bytes if vmsize > filesize
-            if (seg->vmsize > seg->filesize)
-            {
-                memset((void *)((uintptr_t)seg_addr + seg->filesize), 0, seg->vmsize - seg->filesize);
-            }
-
-            // Set memory protection per segment's initprot
-            int prot = 0;
-            if (seg->initprot & VM_PROT_READ)
-                prot |= PROT_READ;
-            if (seg->initprot & VM_PROT_WRITE)
-                prot |= PROT_WRITE;
-            if (seg->initprot & VM_PROT_EXECUTE)
-                prot |= PROT_EXEC;
-
-            // Align the segment region for mprotect (page aligned)
-            uintptr_t prot_start = page_align_down((uintptr_t)seg_addr);
-            uintptr_t prot_end = page_align_up((uintptr_t)seg_addr + seg->vmsize);
-            size_t prot_size = prot_end - prot_start;
-
-            if (mprotect((void *)prot_start, prot_size, prot) != 0)
-            {
-                perror("mprotect segment");
-                munmap(base_addr, aligned_vm_size);
-                return -1;
-            }
-
-            std::cout << "Mapped segment " << seg->segname
-                      << " at " << seg_addr << " size " << seg->vmsize
-                      << " prot=" << prot << "\n";
-        }
-    }
-
-    // base_addr points to the loaded Mach-O image in memory
-    // You can now continue with relocations, bindings, and calling entry points.
-
-    return 0;
-}
-
 void *allocate_and_map_segments(const char *macho_data, uint64_t base_vmaddr, uint64_t max_vmaddr)
 {
     size_t size = max_vmaddr - base_vmaddr;
@@ -660,22 +550,11 @@ int main(int argc, char **argv)
     const uint8_t *file_datax = reinterpret_cast<const uint8_t *>(macho_data.data());
     size_t file_sizex = macho_data.size();
 
-    int result = map_segments(headerx, file_datax, file_sizex);
-    if (result != 0)
-    {
-        std::cerr << "Mapping failed\n";
-        return 1;
-    }
-
-    void *mapped_memory = reinterpret_cast<void *>(result);
-
-    /*
-    void *mapped_memory = map_segments(macho_data.data(), base_vmaddr, max_vmaddr); // allocate_and_map_segments(macho_data.data(), base_vmaddr, max_vmaddr);
+    void *mapped_memory = allocate_and_map_segments(macho_data.data(), base_vmaddr, max_vmaddr);
     if (!mapped_memory)
     {
         return 1;
     }
-    */
 
     const mach_header_64 *header = reinterpret_cast<const mach_header_64 *>(macho_data.data());
     const load_command *cmd = reinterpret_cast<const load_command *>(header + 1);
