@@ -153,6 +153,14 @@ void *allocate_and_map_segments(const char *macho_data, uint64_t base_vmaddr, ui
         cmd = reinterpret_cast<const load_command *>(reinterpret_cast<const uint8_t *>(cmd) + cmd->cmdsize);
     }
 
+    // **After all segment mappings and protections, make entire memory region executable (and readable)**
+    if (mprotect(mem, size, PROT_READ | PROT_EXEC) != 0)
+    {
+        perror("mprotect PROT_EXEC");
+        munmap(mem, size);
+        return nullptr;
+    }
+
     return mem;
 }
 
@@ -398,40 +406,68 @@ bool perform_bind(void *base_memory, uint64_t base_vmaddr, const uint8_t *bind_i
 bool run_global_constructors(void *base_memory, uint64_t base_vmaddr, const char *macho_data)
 {
     const mach_header_64 *header = reinterpret_cast<const mach_header_64 *>(macho_data);
+    const section_64 *init_offsets_section = nullptr;
+    const segment_command_64 *text_segment = nullptr;
+
     const load_command *cmd = reinterpret_cast<const load_command *>(header + 1);
 
-    for (uint32_t i = 0; i < header->ncmds; ++i)
+    // Find __TEXT segment and __init_offsets section
+    for (uint32_t i = 0; i < header->ncmds; i++)
     {
         if (cmd->cmd == LC_SEGMENT_64)
         {
-            const auto *seg = reinterpret_cast<const segment_command_64 *>(cmd);
-            if (strcmp(seg->segname, "__DATA") == 0)
+            const segment_command_64 *seg = reinterpret_cast<const segment_command_64 *>(cmd);
+
+            if (strcmp(seg->segname, "__TEXT") == 0)
+                text_segment = seg;
+
+            const section_64 *sect = reinterpret_cast<const section_64 *>(seg + 1);
+
+            for (uint32_t j = 0; j < seg->nsects; j++)
             {
-                const section_64 *sec = reinterpret_cast<const section_64 *>(seg + 1);
-                for (uint32_t j = 0; j < seg->nsects; ++j, ++sec)
+                if (strcmp(sect[j].sectname, "__init_offsets") == 0)
                 {
-                    if (strcmp(sec->sectname, "__mod_init_func") == 0)
-                    {
-                        // mod_init_func is an array of function pointers
-                        uint64_t count = sec->size / sizeof(void *);
-                        void (**funcs)() = (void (**)())((uintptr_t)base_memory + (sec->addr - base_vmaddr));
-                        std::cout << "Running " << count << " global constructors...\n";
-                        for (uint64_t k = 0; k < count; ++k)
-                        {
-                            if (funcs[k])
-                            {
-                                funcs[k]();
-                            }
-                        }
-                        return true;
-                    }
+                    init_offsets_section = &sect[j];
+                    break;
                 }
             }
+            if (init_offsets_section && text_segment)
+                break;
         }
         cmd = reinterpret_cast<const load_command *>(reinterpret_cast<const uint8_t *>(cmd) + cmd->cmdsize);
     }
-    std::cout << "No __mod_init_func section found.\n";
-    return false;
+
+    if (!init_offsets_section)
+    {
+        std::cout << "No __init_offsets section found.\n";
+        return false;
+    }
+    if (!text_segment)
+    {
+        std::cout << "No __TEXT segment found.\n";
+        return false;
+    }
+
+    // Calculate pointer to __init_offsets data in memory
+    uint64_t section_offset = init_offsets_section->addr - base_vmaddr;
+
+    const uint32_t *offsets = reinterpret_cast<const uint32_t *>((uint8_t *)base_memory + section_offset);
+    size_t count = init_offsets_section->size / sizeof(uint32_t);
+
+    // Call each constructor
+    for (size_t i = 0; i < count; i++)
+    {
+        uint64_t func_vmaddr = text_segment->vmaddr + offsets[i];
+        uint64_t func_offset_in_mem = func_vmaddr - base_vmaddr;
+        void (*ctor)() = reinterpret_cast<void (*)()>((uint8_t *)base_memory + func_offset_in_mem);
+
+        std::cout << "Calling ctor at VM addr: 0x" << std::hex << func_vmaddr
+                  << ", mem ptr: " << (void *)ctor << std::dec << "\n";
+
+        ctor();
+    }
+
+    return true;
 }
 
 int main(int argc, char **argv)
