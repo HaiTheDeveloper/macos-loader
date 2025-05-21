@@ -470,6 +470,45 @@ bool run_global_constructors(void *base_memory, uint64_t base_vmaddr, const char
     return true;
 }
 
+uintptr_t find_symbol_address(const char *macho_data, const std::string &symbol_name, uint64_t base_vmaddr)
+{
+    const mach_header_64 *header = reinterpret_cast<const mach_header_64 *>(macho_data);
+    const load_command *cmd = reinterpret_cast<const load_command *>(header + 1);
+
+    const symtab_command *symtab = nullptr;
+
+    for (uint32_t i = 0; i < header->ncmds; i++)
+    {
+        if (cmd->cmd == LC_SYMTAB)
+        {
+            symtab = reinterpret_cast<const symtab_command *>(cmd);
+            break;
+        }
+        cmd = reinterpret_cast<const load_command *>(reinterpret_cast<const uint8_t *>(cmd) + cmd->cmdsize);
+    }
+
+    if (!symtab)
+    {
+        std::cerr << "No symbol table found\n";
+        return 0;
+    }
+
+    const nlist_64 *symbols = reinterpret_cast<const nlist_64 *>(macho_data + symtab->symoff);
+    const char *string_table = macho_data + symtab->stroff;
+
+    for (uint32_t i = 0; i < symtab->nsyms; i++)
+    {
+        const char *name = string_table + symbols[i].n_un.n_strx;
+        if (symbol_name == std::string(name + 1)) // skip leading '_'
+        {
+            return symbols[i].n_value;
+        }
+    }
+
+    std::cerr << "Symbol not found: " << symbol_name << "\n";
+    return 0;
+}
+
 int main(int argc, char **argv)
 {
     if (argc < 2)
@@ -607,6 +646,19 @@ int main(int argc, char **argv)
     }
 
     std::cout << "Mach-O binary loaded and rebased/bound in memory.\n";
+
+    uintptr_t symbol_addr = find_symbol_address(macho_data.data(), "_hello", base_vmaddr);
+    if (symbol_addr == 0)
+    {
+        std::cerr << "Symbol not found.\n";
+        return 0;
+    }
+
+    using func_t = void (*)();
+
+    func_t func = (func_t)((uintptr_t)mapped_memory + (symbol_addr - base_vmaddr));
+
+    func(); // Call the function!
 
     munmap(mapped_memory, max_vmaddr - base_vmaddr);
 
